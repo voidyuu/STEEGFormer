@@ -16,3 +16,6 @@ data/
 *.pth
 *.ckpt
 
+# Claude Code
+CLAUDE.md
+.claude/
