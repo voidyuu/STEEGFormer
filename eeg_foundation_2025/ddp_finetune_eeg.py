@@ -122,7 +122,7 @@ def get_args_parser():
 
     # Dataset parameters
     parser.add_argument('--local_dataset_dir', default='/dodrio/scratch/projects/2025_500/data',
-                        help='local dataset dir')
+                        help='Root folder containing challenge H5 files, e.g. <root>/challenge1/eeg_challenge1_dataset.h5')
     parser.add_argument('--output_dir', default='/lustre1/scratch/343/vsc34340/MAE_finetune_output',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',

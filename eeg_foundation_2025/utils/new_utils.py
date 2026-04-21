@@ -27,6 +27,43 @@ from utils.challenge_custom_dataset import EEGH5Dataset, EEGH5CropDataset, EEGTw
 from peft import LoraConfig, get_peft_model, TaskType
 from collections import Counter
 
+
+def _candidate_h5_paths(base_dir: str | os.PathLike, challenge_name: str) -> list[Path]:
+    base = Path(base_dir).expanduser()
+    filename = f"eeg_{challenge_name}_dataset.h5"
+    return [
+        base / challenge_name / filename,
+        base / filename,
+        base / f"{challenge_name}.h5",
+    ]
+
+
+def _resolve_challenge_h5_path(args, challenge_name: str) -> str:
+    base_dir = Path(getattr(args, "local_dataset_dir", "")).expanduser()
+    for candidate in _candidate_h5_paths(base_dir, challenge_name):
+        if candidate.is_file():
+            return str(candidate)
+
+    if base_dir.is_dir():
+        bids_markers = (
+            list(base_dir.glob("ds*-bdf*"))
+            or list(base_dir.glob("dataset_description.json"))
+            or list(base_dir.glob("sub-*"))
+        )
+        if bids_markers:
+            raise FileNotFoundError(
+                "The provided local_dataset_dir looks like a raw BIDS EEG folder, "
+                f"not a preprocessed H5 dataset root: {base_dir}. "
+                "This finetuning code expects H5 files such as "
+                f"'challenge1/eeg_challenge1_dataset.h5'."
+            )
+
+    searched = ", ".join(str(p) for p in _candidate_h5_paths(base_dir, challenge_name))
+    raise FileNotFoundError(
+        f"Could not find the H5 file for {challenge_name}. Searched: {searched}. "
+        "Place the file under local_dataset_dir using one of the supported layouts."
+    )
+
 def _collect_last_n_target_linear_names(vit, last_n, targets):
     """
     Build an explicit list of fully-qualified Linear module names to LoRA-wrap,
@@ -409,29 +446,31 @@ def get_model(args, window_length=200, no_channels=129, num_class=1):
 
 
 def get_dataset(args):
+    challenge1_h5 = _resolve_challenge_h5_path(args, "challenge1")
+    challenge2_h5 = _resolve_challenge_h5_path(args, "challenge2")
     if args.challenge == "challenge1":
-        train_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="train")
-        valid_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="valid")
-        test_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="test")
+        train_set = EEGH5Dataset(challenge1_h5, split="train")
+        valid_set = EEGH5Dataset(challenge1_h5, split="valid")
+        test_set = EEGH5Dataset(challenge1_h5, split="test")
         return train_set, valid_set, test_set
     elif args.challenge == "challenge2":
-        train_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        train_set = EEGH5CropDataset(challenge2_h5,
                                      split="train",crop_size=200,seed=2025)
-        valid_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        valid_set = EEGH5CropDataset(challenge2_h5,
                                      split="valid",crop_size=200,seed=2025)
-        test_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        test_set = EEGH5CropDataset(challenge2_h5,
                                     split="test",crop_size=200,seed=2025)
         return train_set, valid_set, test_set
     else:
-        ch1_train = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="train")
-        ch1_valid = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="valid")
-        ch1_test  = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="test")
+        ch1_train = EEGH5Dataset(challenge1_h5, split="train")
+        ch1_valid = EEGH5Dataset(challenge1_h5, split="valid")
+        ch1_test  = EEGH5Dataset(challenge1_h5, split="test")
 
-        ch2_train = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        ch2_train = EEGH5CropDataset(challenge2_h5,
                                      split="train",crop_size=200,seed=2025)
-        ch2_valid = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        ch2_valid = EEGH5CropDataset(challenge2_h5,
                                      split="valid",crop_size=200,seed=2025)
-        ch2_test  = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
+        ch2_test  = EEGH5CropDataset(challenge2_h5,
                                     split="test",crop_size=200,seed=2025)
 
         # Wrap
