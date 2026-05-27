@@ -26,7 +26,10 @@ from models.EEGPT import LitEEGPTModel
 from models.biot import BIOTClassifier
 from models.bendr import BendrClassifier
 from models.cbramod import CBraModClassifier
-from models.fbssvepdnn import SSVEPDNN
+try:
+    from models.fbssvepdnn import SSVEPDNN
+except ModuleNotFoundError:
+    SSVEPDNN = None
 import numpy as np
 
 from util.eeg_downstream_dataset import UpperLimbDataset, ErrorDataset, InnerSpeechDataset, BinocularSSVEPDataset, BCI2aDataset, AlzheimerDataset, DTUDataset
@@ -39,6 +42,9 @@ from typing import Type, Any
 import yaml
 import wandb
 from wandb import Api
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SEN_CHAN_IDX_PATH = REPO_ROOT / "pretrain" / "senloc_file" / "sen_chan_idx.pkl"
 
 def run_exists_online(
     api: wandb.Api,
@@ -60,6 +66,8 @@ def run_exists_online(
     """
     # Helper to check job states
     def get_run_states(jobtype):
+        if not project_path:
+            return set()
         filters = {
             "group": group_name,
             "config.fold": fold,
@@ -69,9 +77,12 @@ def run_exists_online(
             "config.subject_of_interest": subject_of_interest,
             "config.optimizer_spec": optimizer_spec,
         }
-        runs = api.runs(project_path, filters=filters)
-        states = set(run.state for run in runs)
-        return states
+        try:
+            runs = api.runs(project_path, filters=filters)
+            return set(run.state for run in runs)
+        except ValueError as exc:
+            print(f"Skipping W&B online dedupe for {project_path}: {exc}", flush=True)
+            return set()
 
     train_states = get_run_states("train")
     finetune_states = get_run_states("fine-tune")
@@ -427,6 +438,14 @@ def create_optimizer(args, model):
     model_name = args.model.lower()
     lr         = args.lr
     wd         = args.weight_decay
+    if lr is None:
+        batch_size = getattr(args, "batch_size", getattr(args, "train_batch_size", 1))
+        accum_iter = getattr(args, "accum_iter", 1)
+        world_size = getattr(args, "world_size", 1)
+        eff_batch_size = batch_size * accum_iter * world_size
+        lr = args.blr * eff_batch_size / 256
+        args.lr = lr
+        print(f"actual lr: {lr:.2e}")
 
     # ----------------------------------------------------------------------------
     # 1) "linear_prob" spec: freeze all â†’ unfreeze a small head â†’ single AdamW
@@ -529,7 +548,12 @@ def get_model(args):
         if args.vit_pretrained_model_dir:
             checkpoint = torch.load(args.vit_pretrained_model_dir, map_location='cpu')
             print("Load pre-trained checkpoint from: %s" % args.vit_pretrained_model_dir)
-            checkpoint_model = checkpoint['model']
+            if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                checkpoint_model = checkpoint['model']
+            elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                checkpoint_model = checkpoint['state_dict']
+            else:
+                checkpoint_model = checkpoint
             state_dict = model.state_dict()
             for k in ['head.weight', 'head.bias']:
                 if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
@@ -564,6 +588,11 @@ def get_model(args):
         return model
     
     elif args.model == "ssvepdnn":
+        if SSVEPDNN is None:
+            raise ModuleNotFoundError(
+                "models.fbssvepdnn is unavailable in this checkout. "
+                "Use a different --model or add benchmark/neural_networks/models/fbssvepdnn.py."
+            )
         model = SSVEPDNN(no_fb=7, no_channels=args.downstream_task_num_chan, no_combined_channels=280, drop_out_ratio_1=0.2, drop_out_ratio_2=0.9, input_length=int(args.downstream_task_t*args.downstream_task_fs), num_class=args.nb_classes)
         return model
     
@@ -830,7 +859,7 @@ def prepared_downstream_task_for_model(args):
         args.model_downstream_task_fs = 200
     elif "vit" in args.model:
         args.model_downstream_task_fs = 128
-        with open("/vsc-hard-mounts/leuven-data/343/vsc34340/new_eeg_mae/senloc_file/sen_chan_idx.pkl", "rb") as f:
+        with SEN_CHAN_IDX_PATH.open("rb") as f:
             data = pickle.load(f)
             # build a lowercase lookup
             lower_map = {k.lower(): v for k, v in data['channels_mapping'].items()}

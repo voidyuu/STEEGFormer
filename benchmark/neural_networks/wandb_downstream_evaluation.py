@@ -28,8 +28,8 @@ def get_args_parser():
     # Wandb parameters
     parser.add_argument('--wandb_project', default='debug', type=str,
                         help='Name of the Wandb project')
-    parser.add_argument('--wandb_entity', default='liuyin_yang-ku-leuven', type=str,
-                        help='Wandb account')
+    parser.add_argument('--wandb_entity', default=os.environ.get('WANDB_ENTITY', ''), type=str,
+                        help='Wandb account; leave empty to use the logged-in default')
     parser.add_argument('--wandb_log_dir', default='/lustre1/project/stg_00160/wandb_log_bci_iv2a', type=str,
                         help='Wandb log directory')
     parser.add_argument('--wandb_log_every', type=int, default=5,
@@ -169,7 +169,7 @@ def main_train(args):
     
     # Initialize the W&B API (for online checks)
     api = wandb.Api()
-    proj_path = f"{args.wandb_entity}/{args.wandb_project}"
+    proj_path = f"{args.wandb_entity}/{args.wandb_project}" if args.wandb_entity else None
     
     for run_idx in range(experiment_run_split.get_number_of_runs()):
         # initialize the run name
@@ -236,9 +236,8 @@ def main_train(args):
             criterion = get_loss_criterion(args)
             
             # initialize a fresh W&B run for this fold
-            run = wandb.init(
+            wandb_init_kwargs = dict(
                 project=args.wandb_project,
-                entity=args.wandb_entity,
                 group=wandb_group_name,
                 dir=args.wandb_log_dir,
                 name=this_run_name,
@@ -252,6 +251,9 @@ def main_train(args):
                   "subject_of_interest": current_run_sub_of_interested,
                 },
             )
+            if args.wandb_entity:
+                wandb_init_kwargs["entity"] = args.wandb_entity
+            run = wandb.init(**wandb_init_kwargs)
             # watch model parameters & gradients
             wandb.watch(model, log="all", log_freq=100)
             
@@ -284,9 +286,8 @@ def main_train(args):
                 model.cuda()
                 
                 # Start a new W&B run for finetuning
-                run = wandb.init(
+                wandb_init_kwargs = dict(
                     project=args.wandb_project,
-                    entity=args.wandb_entity,
                     group=wandb_group_name,
                     dir=args.wandb_log_dir,
                     name=this_run_name,
@@ -300,7 +301,9 @@ def main_train(args):
                       "subject_of_interest": current_run_sub_of_interested,
                     },
                 )
-
+                if args.wandb_entity:
+                    wandb_init_kwargs["entity"] = args.wandb_entity
+                run = wandb.init(**wandb_init_kwargs)
                 wandb.watch(model, log="all", log_freq=100)
                 
                 run_phase(

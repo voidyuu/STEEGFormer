@@ -9,9 +9,13 @@ import pickle
 import h5py
 import os
 import time
+from pathlib import Path
 from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SEN_CHAN_IDX_PATH = REPO_ROOT / "pretrain" / "senloc_file" / "sen_chan_idx.pkl"
 
 
 class SequentialLoader:
@@ -148,7 +152,7 @@ class CustomPretrainDataset(torch.utils.data.Dataset):
             self.positions_list = indice_df['Position'].tolist()
 
         # Load the channel indices
-        with open("/dodrio/scratch/projects/2025_038/mae/senloc_file/sen_chan_idx.pkl", 'rb') as file:
+        with SEN_CHAN_IDX_PATH.open('rb') as file:
             all_senloc = pickle.load(file)
             self.senloc = torch.from_numpy(all_senloc[dataset_name]).type(torch.IntTensor)
             self.num_channel = self.senloc.shape[0]

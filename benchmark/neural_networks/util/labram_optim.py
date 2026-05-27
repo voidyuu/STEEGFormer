@@ -14,9 +14,15 @@ from timm.optim.adafactor import Adafactor
 from timm.optim.adahessian import Adahessian
 from timm.optim.adamp import AdamP
 from timm.optim.lookahead import Lookahead
-from timm.optim.nadam import Nadam
+try:
+    from timm.optim.nadam import Nadam
+except ImportError:
+    from timm.optim.nadam import NAdamLegacy as Nadam
 from timm.optim.nvnovograd import NvNovoGrad
-from timm.optim.radam import RAdam
+try:
+    from timm.optim.radam import RAdam
+except ImportError:
+    from timm.optim.radam import RAdamLegacy as RAdam
 from timm.optim.rmsprop_tf import RMSpropTF
 from timm.optim.sgdp import SGDP
 
