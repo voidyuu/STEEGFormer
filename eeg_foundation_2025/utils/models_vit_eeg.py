@@ -163,6 +163,9 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
         head_drop_out = 0.0,
         num_tokens: int | None = None,   # required if global_pool == "all"
         num_tasks: int | None = None,    # NEW: number of tasks (e.g., 2)
+        input_sample_rate_hz: float = 100.0,
+        model_sample_rate_hz: float = 128.0,
+        apply_input_resample: bool = True,
         **kwargs
     ):
         super(VisionTransformer, self).__init__(**kwargs)
@@ -173,6 +176,9 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
 
         self.global_pool = global_pool
         embed_dim = kwargs["embed_dim"]
+        self.input_sample_rate_hz = float(input_sample_rate_hz)
+        self.model_sample_rate_hz = float(model_sample_rate_hz)
+        self.apply_input_resample = bool(apply_input_resample)
 
         # Remove timm's head and norm — we'll use our own head
         if hasattr(self, "head"):
@@ -282,8 +288,10 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
     # PEFT may pass the first tensor as 'input_ids'
         if x is None and "input_ids" in kwargs:
             x = kwargs.pop("input_ids")
-        # upsample + z-norm (unchanged)
-        eeg = self.upsample_eeg_linear(x, 128, 100)
+        if self.apply_input_resample and abs(self.input_sample_rate_hz - self.model_sample_rate_hz) > 1e-6:
+            eeg = self.upsample_eeg_linear(x, self.model_sample_rate_hz, self.input_sample_rate_hz)
+        else:
+            eeg = x
         with autocast_amp(enabled=False):
             eegf = eeg.float()
             mean = eegf.mean(dim=2, keepdim=True)

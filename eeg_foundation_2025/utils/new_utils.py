@@ -20,12 +20,23 @@ import wandb
 from datetime import datetime
 from pathlib import Path
 import torch.distributed as dist
+import re
 
 import math
 import pickle
 from utils.challenge_custom_dataset import EEGH5Dataset, EEGH5CropDataset, EEGTwoChallengeDataset
-from peft import LoraConfig, get_peft_model, TaskType
 from collections import Counter
+
+
+def _load_peft():
+    try:
+        from peft import LoraConfig, get_peft_model, TaskType
+    except ImportError as exc:
+        raise ImportError(
+            "PEFT/transformers dependencies are required only when --use_lora is enabled. "
+            "Please install compatible versions or run without --use_lora."
+        ) from exc
+    return LoraConfig, get_peft_model, TaskType
 
 def _collect_last_n_target_linear_names(vit, last_n, targets):
     """
@@ -92,6 +103,7 @@ def _collect_last_n_target_linear_fqns(vit, last_n, targets):
 
 def _apply_peft_lora_to_vit(model, *, r, alpha, dropout, targets, last_n,
                             train_bias=False, train_norms=True, verbose=True):
+    LoraConfig, get_peft_model, TaskType = _load_peft()
     base = model
 
     # 1) Build exact list of modules to wrap (only last_n blocks)
@@ -272,6 +284,30 @@ def reduce_scalar_tensor(val, average=True):
 EPOCH_LEN_S = 2.0
 SFREQ = 100 # by definition here
 
+
+def _get_vit_patch_size(model_name: str) -> int:
+    match = re.search(r"patch(\d+)", str(model_name))
+    return int(match.group(1)) if match else 16
+
+
+def infer_dataset_model_specs(dataset):
+    ref_ds = dataset
+    if isinstance(dataset, EEGTwoChallengeDataset):
+        ref_ds = dataset.ds0 if dataset.ds0 is not None else dataset.ds1
+
+    window_length = int(getattr(ref_ds, "window_len_samples", 200))
+    no_channels = int(getattr(ref_ds, "n_channels", 129))
+    sample_rate_hz = float(getattr(ref_ds, "sample_rate_hz", SFREQ))
+    model_sample_rate_hz = float(getattr(ref_ds, "model_sample_rate_hz", 128.0))
+    apply_vit_resample = bool(getattr(ref_ds, "apply_vit_resample", abs(sample_rate_hz - model_sample_rate_hz) > 1e-6))
+    return {
+        "window_length": window_length,
+        "no_channels": no_channels,
+        "sample_rate_hz": sample_rate_hz,
+        "model_sample_rate_hz": model_sample_rate_hz,
+        "apply_vit_resample": apply_vit_resample,
+    }
+
 def setup_experiment_dirs(args, model=None):
     """
     Make args.output_dir and args.log_dir point to:
@@ -315,27 +351,34 @@ def setup_experiment_dirs(args, model=None):
     
 
 
-def get_model(args, window_length=200, no_channels=129, num_class=1):
+def get_model(args, window_length=200, no_channels=129, num_class=1,
+              sample_rate_hz=100.0, model_sample_rate_hz=128.0,
+              apply_vit_resample=True):
     if args.model == "eegnet":
         model = EEGNet(no_spatial_filters=4, no_channels=no_channels, no_temporal_filters=8, temporal_length_1=64, temporal_length_2=16, window_length=window_length, num_class=num_class, drop_out_ratio=0.50, pooling2=4, pooling3=8)
         return model
     elif args.model == "ctnet":
         model = EEGTransformer(heads=4, emb_size=40, depth=6, number_class=num_class, number_channel=no_channels,
-                       data_length=int(window_length), sampling_rate=int(100))
+                       data_length=int(window_length), sampling_rate=int(round(sample_rate_hz)))
         return model
     if "vit" in args.model:
         if args.challenge == "both":
             num_tasks = 2
         else:
             num_tasks = 1
+        patch_size = _get_vit_patch_size(args.model)
+        vit_window_length = int(round(window_length * model_sample_rate_hz / sample_rate_hz)) if apply_vit_resample else int(window_length)
         model = models_vit_eeg.__dict__[args.model](
             num_classes=num_class,
             num_tasks=num_tasks,
-            num_tokens=int(window_length/100*128*no_channels/16),
+            num_tokens=int(vit_window_length * no_channels / patch_size),
             drop_path_rate=0.1,
             proj_drop_rate=0.00,
             global_pool=args.head_method,
-            head_drop_out=args.head_dropout
+            head_drop_out=args.head_dropout,
+            input_sample_rate_hz=sample_rate_hz,
+            model_sample_rate_hz=model_sample_rate_hz,
+            apply_input_resample=apply_vit_resample,
         )
         if hasattr(model, "set_grad_checkpointing"):
             print("Enabling grad checkpointing")
@@ -410,29 +453,41 @@ def get_model(args, window_length=200, no_channels=129, num_class=1):
 
 def get_dataset(args):
     if args.challenge == "challenge1":
-        train_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="train")
-        valid_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="valid")
-        test_set = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="test")
+        train_set = EEGH5Dataset(args.challenge1_h5_path, split="train")
+        valid_set = EEGH5Dataset(args.challenge1_h5_path, split="valid")
+        test_set = EEGH5Dataset(args.challenge1_h5_path, split="test")
         return train_set, valid_set, test_set
     elif args.challenge == "challenge2":
         train_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                     split="train",crop_size=200,seed=2025)
+                                     split="train", crop_size=200, seed=2025, sample_rate_hz=100.0, model_sample_rate_hz=128.0)
         valid_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                     split="valid",crop_size=200,seed=2025)
+                                     split="valid", crop_size=200, seed=2025, sample_rate_hz=100.0, model_sample_rate_hz=128.0)
         test_set = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                    split="test",crop_size=200,seed=2025)
+                                    split="test", crop_size=200, seed=2025, sample_rate_hz=100.0, model_sample_rate_hz=128.0)
         return train_set, valid_set, test_set
     else:
-        ch1_train = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="train")
-        ch1_valid = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="valid")
-        ch1_test  = EEGH5Dataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge1/eeg_challenge1_dataset.h5", split="test")
+        ch1_train = EEGH5Dataset(args.challenge1_h5_path, split="train")
+        ch1_valid = EEGH5Dataset(args.challenge1_h5_path, split="valid")
+        ch1_test  = EEGH5Dataset(args.challenge1_h5_path, split="test")
+        ch2_crop = 200
+        ch2_resample_to = None
+        ch2_target_sfreq = 100.0
+        if ch1_train.window_len_samples != ch2_crop or abs(ch1_train.sample_rate_hz - 100.0) > 1e-6:
+            ch2_resample_to = ch1_train.window_len_samples
+            ch2_target_sfreq = ch1_train.sample_rate_hz
 
         ch2_train = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                     split="train",crop_size=200,seed=2025)
+                                     split="train", crop_size=ch2_crop, resample_to_length=ch2_resample_to,
+                                     sample_rate_hz=100.0, target_sample_rate_hz=ch2_target_sfreq,
+                                     model_sample_rate_hz=128.0, seed=2025)
         ch2_valid = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                     split="valid",crop_size=200,seed=2025)
+                                     split="valid", crop_size=ch2_crop, resample_to_length=ch2_resample_to,
+                                     sample_rate_hz=100.0, target_sample_rate_hz=ch2_target_sfreq,
+                                     model_sample_rate_hz=128.0, seed=2025)
         ch2_test  = EEGH5CropDataset("/dodrio/scratch/projects/2025_500/h5_challenge_datasets/challenge2/eeg_challenge2_dataset.h5",
-                                    split="test",crop_size=200,seed=2025)
+                                    split="test", crop_size=ch2_crop, resample_to_length=ch2_resample_to,
+                                    sample_rate_hz=100.0, target_sample_rate_hz=ch2_target_sfreq,
+                                    model_sample_rate_hz=128.0, seed=2025)
 
         # Wrap
         train_ds = EEGTwoChallengeDataset(ch1_train, ch2_train)

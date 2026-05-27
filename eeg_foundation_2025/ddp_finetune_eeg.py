@@ -23,7 +23,7 @@ import pickle
 import utils.misc as misc
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 from utils.misc import print_size
-from utils.new_utils import get_model, get_dataset, get_dataloader, get_dataloader_both, get_optimizer, get_loss, log_training_results, setup_experiment_dirs, freeze_for_finetune
+from utils.new_utils import get_model, get_dataset, get_dataloader, get_dataloader_both, get_optimizer, get_loss, log_training_results, setup_experiment_dirs, freeze_for_finetune, infer_dataset_model_specs
 
 from engine_finetune_eeg import train_one_epoch, evaluate
 import wandb
@@ -123,6 +123,11 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--local_dataset_dir', default='/dodrio/scratch/projects/2025_500/data',
                         help='local dataset dir')
+    parser.add_argument(
+        '--challenge1_h5_path',
+        default='/mnt/E/zhuyu_data/eeg-challenges/challenge1/eeg_challenge1_dataset.h5',
+        help='Path to the preprocessed Challenge 1 HDF5 file.',
+    )
     parser.add_argument('--output_dir', default='/lustre1/scratch/343/vsc34340/MAE_finetune_output',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
@@ -201,8 +206,39 @@ def model_training(args):
     else:
         device = torch.device(args.device)
 
+    # --- Load datasets first so model input specs follow the actual H5 contract ---
+    if args.challenge == "both":
+        train_set, valid_ds1, valid_ds2, test_ds1, test_ds2 = get_dataset(args)
+        dataset_specs = infer_dataset_model_specs(train_set)
+    else:
+        train_set, valid_set, test_set = get_dataset(args)
+        dataset_specs = infer_dataset_model_specs(train_set)
+
+    for key, value in dataset_specs.items():
+        setattr(args, key, value)
+
+    if getattr(args, "rank", 0) == 0:
+        print(
+            "Dataset/model specs:",
+            {
+                "window_length": args.window_length,
+                "no_channels": args.no_channels,
+                "sample_rate_hz": args.sample_rate_hz,
+                "model_sample_rate_hz": args.model_sample_rate_hz,
+                "apply_vit_resample": args.apply_vit_resample,
+            },
+            flush=True,
+        )
+
     # --- Build model (identical on all ranks) ---
-    model = get_model(args).to(device)
+    model = get_model(
+        args,
+        window_length=args.window_length,
+        no_channels=args.no_channels,
+        sample_rate_hz=args.sample_rate_hz,
+        model_sample_rate_hz=args.model_sample_rate_hz,
+        apply_vit_resample=args.apply_vit_resample,
+    ).to(device)
     
     # --- Freeze ONCE (pre-DDP), depending on LoRA or classic finetune ---
     is_vit = "vit" in str(args.model).lower()
@@ -243,16 +279,12 @@ def model_training(args):
         f"Optimizer has {len(opt_ids)} params, but {len(ddp_ids)} are trainable in the model."
     )
     
-    # get the train-valid-test dataset
+    # get the dataloaders
     if args.challenge == "both":
-        train_set, valid_ds1, valid_ds2, test_ds1, test_ds2 = get_dataset(args)
         print(len(train_set),len(valid_ds1),len(valid_ds2),len(test_ds1),len(test_ds2))
-        # get the dataloader 
         train_loader, valid_loader1, valid_loader2, test_loader1, test_loader2 = get_dataloader_both(args, train_set, valid_ds1, valid_ds2, test_ds1, test_ds2)
     else:
-        train_set, valid_set, test_set = get_dataset(args)
         print(len(train_set),len(valid_set),len(test_set))
-        # get the dataloader 
         train_loader, valid_loader, test_loader = get_dataloader(args, train_set, valid_set, test_set)
 
 

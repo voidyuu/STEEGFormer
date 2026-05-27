@@ -9,6 +9,20 @@ import numpy as np
 import random
 import os
 
+
+def _decode_attr(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return _decode_attr(value.item())
+    return value
+
+
+def _infer_sample_rate_hz(window_len_samples, window_len_sec):
+    if window_len_sec and window_len_sec > 0:
+        return float(window_len_samples) / float(window_len_sec)
+    return 100.0
+
 class EEGTwoChallengeDataset(Dataset):
     """
     If both datasets are given: concatenates them, returning (eeg, target, ch_idx).
@@ -23,6 +37,13 @@ class EEGTwoChallengeDataset(Dataset):
         self.len0 = len(ds_ch1) if ds_ch1 is not None else 0
         self.len1 = len(ds_ch2) if ds_ch2 is not None else 0
         self.cum  = [self.len0, self.len0 + self.len1]
+        ref_ds = ds_ch1 if ds_ch1 is not None else ds_ch2
+        self.n_channels = getattr(ref_ds, "n_channels", None)
+        self.window_len_samples = getattr(ref_ds, "window_len_samples", None)
+        self.window_len_sec = getattr(ref_ds, "window_len_sec", None)
+        self.sample_rate_hz = getattr(ref_ds, "sample_rate_hz", None)
+        self.model_sample_rate_hz = getattr(ref_ds, "model_sample_rate_hz", None)
+        self.apply_vit_resample = getattr(ref_ds, "apply_vit_resample", None)
 
     def __len__(self):
         return self.cum[-1]
@@ -58,7 +79,28 @@ class EEGH5Dataset(Dataset):
 
         # Read dataset length once without loading data
         with h5py.File(self.h5_path, "r") as f:
+            data_ds = f[f"{split}/data"]
             self.length = f[f"{split}/targets"].shape[0]
+            self.n_channels = int(data_ds.shape[1])
+            self.window_len_samples = int(data_ds.shape[2])
+            self.window_len_sec = float(_decode_attr(f.attrs.get("window_len_sec", 2.0)))
+            self.sample_rate_hz = float(
+                _decode_attr(
+                    f.attrs.get(
+                        "sample_rate_hz",
+                        _infer_sample_rate_hz(self.window_len_samples, self.window_len_sec),
+                    )
+                )
+            )
+            self.model_sample_rate_hz = float(_decode_attr(f.attrs.get("model_sample_rate_hz", 128.0)))
+            self.apply_vit_resample = bool(
+                _decode_attr(
+                    f.attrs.get(
+                        "requires_vit_resample",
+                        abs(self.sample_rate_hz - self.model_sample_rate_hz) > 1e-6,
+                    )
+                )
+            )
 
     def __len__(self):
         return self.length
@@ -94,7 +136,11 @@ class EEGH5CropDataset(Dataset):
                  h5_path: str,
                  split: str = "train",
                  crop_size: int = 200,
+                 resample_to_length: int | None = None,
                  seed: int = 2025,
+                 sample_rate_hz: float = 100.0,
+                 target_sample_rate_hz: float | None = None,
+                 model_sample_rate_hz: float = 128.0,
                  use_swmr: bool = False,
                  rdcc_nbytes: int = 512 * 1024 * 1024,   # 512 MiB cache
                  rdcc_nslots: int = 1_000_003,
@@ -104,8 +150,12 @@ class EEGH5CropDataset(Dataset):
         self.h5_path = h5_path
         self.split = split
         self.crop_size = int(crop_size)
+        self.resample_to_length = int(resample_to_length) if resample_to_length is not None else None
         self.base_seed = int(seed)
         self.rng = random.Random(seed)
+        self.source_sample_rate_hz = float(sample_rate_hz)
+        self.target_sample_rate_hz = float(target_sample_rate_hz) if target_sample_rate_hz is not None else None
+        self.model_sample_rate_hz = float(model_sample_rate_hz)
         self.use_swmr = bool(use_swmr)
         self.rdcc_nbytes = int(rdcc_nbytes)
         self.rdcc_nslots = int(rdcc_nslots)
@@ -119,9 +169,17 @@ class EEGH5CropDataset(Dataset):
             self.length = d.shape[0]
             self.C = d.shape[1]
             self.T = d.shape[2]
+            self.n_channels = self.C
 
         if self.crop_size > self.T:
             raise ValueError(f"crop_size {self.crop_size} > T {self.T}")
+
+        self.window_len_samples = self.resample_to_length or self.crop_size
+        self.sample_rate_hz = (
+            float(self.target_sample_rate_hz) if self.target_sample_rate_hz is not None else float(self.source_sample_rate_hz)
+        )
+        self.window_len_sec = float(self.crop_size) / float(self.source_sample_rate_hz)
+        self.apply_vit_resample = abs(self.sample_rate_hz - self.model_sample_rate_hz) > 1e-6
 
         # HDF5 handle and optional per-worker buffer (created after fork)
         self.h5_file = None
@@ -176,6 +234,11 @@ class EEGH5CropDataset(Dataset):
             # Simple path (fast if file is contiguous or per-sample chunked)
             X = dX[idx]                    # (C, T)
             X = X[:, start:start+self.crop_size]  # (C, crop)
+
+        if self.resample_to_length is not None and self.resample_to_length != X.shape[1]:
+            from scipy.signal import resample
+
+            X = resample(np.asarray(X), self.resample_to_length, axis=1)
 
         y = dy[idx]
         return torch.from_numpy(np.asarray(X)).float(), torch.tensor(y, dtype=torch.float32)
