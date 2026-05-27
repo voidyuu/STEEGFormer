@@ -191,19 +191,22 @@ def run_phase(model, train_loader, test_loader_whole, test_loaders, prefix, args
             log_writer=log_writer, args=args, tag_base=prefix
         )
 
-        # 2) evaluate on whole
-        test_whole = evaluate(test_loader_whole, model, device, args)
-
-        # 3) per-subject eval
+        should_eval = (epoch == epochs - 1)
+        test_whole = {}
         individual = {}
-        loaders = test_loaders if isinstance(test_loaders, list) else [test_loaders]
-        if len(loaders) > 1:
-            for loader in loaders:
-                subj_name = loader.dataset.subjectName
-                individual[subj_name] = evaluate(loader, model, device, args)
+        if should_eval:
+            # 2) evaluate on whole
+            test_whole = evaluate(test_loader_whole, model, device, args)
+
+            # 3) per-subject eval
+            loaders = test_loaders if isinstance(test_loaders, list) else [test_loaders]
+            if len(loaders) > 1:
+                for loader in loaders:
+                    subj_name = loader.dataset.subjectName
+                    individual[subj_name] = evaluate(loader, model, device, args)
 
         # 4) TensorBoard logging (optional)
-        if log_writer:
+        if log_writer and should_eval:
             tb_base = prefix + "/"
             # train scalars
             for k, v in train_stats.items():
@@ -220,7 +223,7 @@ def run_phase(model, train_loader, test_loader_whole, test_loaders, prefix, args
 
         # 5) Wandb logging every 5 epochs (and always on the last one)
         flat = {}
-        if epoch % wandb_log_freq==0 or epoch == epochs - 1:
+        if should_eval:
             flat = wandb_log_stats(
                 prefix=prefix,
                 epoch=epoch,

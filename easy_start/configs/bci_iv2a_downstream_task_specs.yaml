@@ -1,0 +1,6 @@
+bci_iv2a:
+  num_classes: 4
+  left_hand: 0
+  right_hand: 1
+  feet: 2
+  tongue: 3

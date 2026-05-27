@@ -1,0 +1,31 @@
+bci_iv2a:
+  data_dir: /home/zhuyu/STEEGFormer/artifacts/bci_iv2a/subjects
+  task_time: 4
+  fold: 1
+  fs: 256
+  n_channels: 22
+  labram_divisor: 100
+  eegpt_divisor: 1000
+  chan_names:
+    - Fz
+    - FC3
+    - FC1
+    - FCz
+    - FC2
+    - FC4
+    - C5
+    - C3
+    - C1
+    - Cz
+    - C2
+    - C4
+    - C6
+    - CP3
+    - CP1
+    - CPz
+    - CP2
+    - CP4
+    - P1
+    - Pz
+    - P2
+    - POz

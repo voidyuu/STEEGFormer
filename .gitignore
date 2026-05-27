@@ -19,3 +19,7 @@ data/
 # Claude Code
 CLAUDE.md
 .claude/
+
+artifacts/
+wandb/
+runs/
