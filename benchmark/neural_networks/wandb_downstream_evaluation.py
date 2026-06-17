@@ -149,6 +149,10 @@ def get_args_parser():
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
+    parser.add_argument('--only_subjects', default='', type=str,
+                        help='Optional comma-separated list of held-out per-subject runs to execute, e.g. A3,A7')
+    parser.add_argument('--force_selected_subjects', action='store_true',
+                        help='Bypass online/offline skip checks for subjects selected via --only_subjects')
 
     return parser
 
@@ -156,6 +160,9 @@ def get_args_parser():
 def main_train(args):
     device = torch.device(args.device)
     global_out_put_dir = args.output_dir
+    selected_subjects = {
+        subject.strip() for subject in args.only_subjects.split(",") if subject.strip()
+    }
     # job name
     job_name = args.evaluation_scheme
     # initialize the downstream task info
@@ -176,6 +183,13 @@ def main_train(args):
         wandb_group_name = experiment_run_split.get_run_description(run_idx)
         current_run_sub_of_interested = wandb_group_name.split("sub-")[-1]
         args.current_run_sub_of_interested = current_run_sub_of_interested
+        if selected_subjects and current_run_sub_of_interested not in selected_subjects:
+            print(
+                f"⏭  Skipping run {run_idx}, {wandb_group_name} "
+                f"(not in only_subjects={sorted(selected_subjects)}).",
+                flush=True,
+            )
+            continue
         this_run_split = experiment_run_split.get_run(run_idx)
         # fix the seed for reproducibility
         torch.manual_seed(args.seed)
@@ -186,7 +200,17 @@ def main_train(args):
             this_run_name = f"fold{fold}_{args.model}_{args.optimizer_spec}_{wandb.util.generate_id()}"
             
             # SKIP TRAIN PHASE?
-            if should_skip_run(
+            force_this_subject = (
+                args.force_selected_subjects and
+                current_run_sub_of_interested in selected_subjects
+            )
+            if force_this_subject:
+                print(
+                    f"⏭Force rerun enabled for {this_run_name} fold {fold} "
+                    f"({current_run_sub_of_interested}).",
+                    flush=True,
+                )
+            elif should_skip_run(
                 api,
                 proj_path,
                 args.log_dir,

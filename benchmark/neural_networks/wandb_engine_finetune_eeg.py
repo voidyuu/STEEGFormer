@@ -310,8 +310,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 sys.exit(1)
 
             loss /= accum_iter
+            # Use optimizer-owned parameters for grad norm/clipping to avoid
+            # traversing unrelated/non-module attributes attached to the model.
+            optimizer_params = [
+                param
+                for group in optimizer.param_groups
+                for param in group["params"]
+            ]
             loss_scaler(loss, optimizer, clip_grad=max_norm,
-                        parameters=model.parameters(), create_graph=False,
+                        parameters=optimizer_params, create_graph=False,
                         update_grad=(data_iter_step + 1) % accum_iter == 0)
             #print("loss scaler update", flush=True)
             if (data_iter_step + 1) % accum_iter == 0:
